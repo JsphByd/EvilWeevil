@@ -2,11 +2,10 @@ package main
 
 import (
 	"log"
-	//"io/ioutil"
-	"bufio"
+	//"bufio"
+	"gopkg.in/yaml.v2"
 	"net/http"
 	"golang.org/x/net/html"
-	//"regexp"
 	"os"
 	"io"
 	"strings"
@@ -14,32 +13,40 @@ import (
 	"flag"
 )
 
+type Config struct {
+	Domains 	[]string `yaml:"domains"`
+	SearchTerms []string `yaml:"search_terms"`
+}
 
 func main(){
 
 	//vars
-	var domainList []string
+	var config Config
+	var baseDomains []string
+	var searchTerms []string
 	var baseDomain string
-	var searchTerm string
 	var path string
 
-	flag.StringVar(&searchTerm, "t", "search term", "Search Term")
-	flag.StringVar(&path, "p", "./domainList", "path to domains file")
+	flag.StringVar(&path, "p", "./config.yml", "path to domains file")
 	flag.Parse()
 
-	domainList = readDomainsFile(path) //read entries in domains file
+	config = readDomainsFile(path) //read entries in domains file
+	baseDomains = config.Domains
+	searchTerms = config.SearchTerms
 	
-	for _, baseDomain = range(domainList) {
-		log.Println("Searching domain:", baseDomain, "for search term", searchTerm)
-		fetchFiles(baseDomain, baseDomain, searchTerm)
+	for _, baseDomain = range(baseDomains) {
+		log.Println("\n\nSearching domain:", baseDomain, "for search terms", searchTerms)
+		fetchFiles(baseDomain, baseDomain, searchTerms)
 	}
 }
 
 
-func fetchFiles(domain string, baseDomain string, searchTerm string) {
+func fetchFiles(domain string, baseDomain string, searchTerms []string) {
 	var urlData io.ReadCloser
 	var URL string
 	var buf bytes.Buffer
+	var searchTerm string
+	var search int
 
 
 	if !strings.Contains(domain, "http") {
@@ -58,10 +65,12 @@ func fetchFiles(domain string, baseDomain string, searchTerm string) {
 	bytes, _ := io.ReadAll(tee)
 	siteString := string(bytes)
 	
-	search := searchBody(strings.ToLower(siteString), strings.ToLower(searchTerm))
-	if search == 0 {
-		log.Println("FOUND AT: ", URL)
-	} 
+	for _, searchTerm = range(searchTerms) {
+		search = searchBody(strings.ToLower(siteString), strings.ToLower(searchTerm))
+		if search == 0 {
+			log.Println("FOUND AT: ", URL)
+		} 
+	}
 
 	siteMap := collectInternalLinks(&buf, URL)
 
@@ -71,18 +80,18 @@ func fetchFiles(domain string, baseDomain string, searchTerm string) {
  	for key := range(siteMap) {
 		if key == "CSS" {
 			for _, obj := range(siteMap["CSS"]) {
-				fetchFiles(obj, baseDomain, searchTerm)
+				fetchFiles(obj, baseDomain, searchTerms)
 			}
 		} else if key == "JS" {
 			for _,  obj := range(siteMap["JS"]) {
-				fetchFiles(obj, baseDomain, searchTerm)
+				fetchFiles(obj, baseDomain, searchTerms)
 			}
 		} else if key == "A" {
 			for _, obj := range(siteMap["A"]) {
 				if strings.Contains(strings.ToLower(obj), strings.ToLower(baseDomain)) {
-					fetchFiles(obj, baseDomain, searchTerm)
+					fetchFiles(obj, baseDomain, searchTerms)
 				} else {
-					log.Println("EXTERNAL SITE")
+					log.Println("EXTERNAL SITE", obj)
 				}
 			}
 		}	
@@ -212,21 +221,20 @@ func createDir(baseDomain string, subString string, sub bool) string { //create 
 }
 
 
-func readDomainsFile(path string) []string {
-	var domainList []string
-	
-	file, err := os.Open(path)
+func readDomainsFile(path string) Config {
+	var config Config
+
+	yamlData, err := os.ReadFile("config.yml")
 	message := "INVALID FILE PATH " + path
 	errorOutput(err, true, message)
 
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		domainList = append(domainList, scanner.Text())
+	err = yaml.Unmarshal(yamlData, &config)
+	if err != nil {
+		log.Fatal(err)
 	}
+	errorOutput(err, true, "Invalid Yaml")
 
-	return domainList
+	return config
 }
 
 
