@@ -68,7 +68,7 @@ func fetchFiles(domain string, baseDomain string, searchTerms []string) {
 	for _, searchTerm = range(searchTerms) {
 		search = searchBody(strings.ToLower(siteString), strings.ToLower(searchTerm))
 		if search == 0 {
-			log.Println("FOUND AT: ", URL)
+			log.Println("FOUND",searchTerm,"AT: ", URL)
 		} 
 	}
 
