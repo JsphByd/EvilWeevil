@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 	"bytes"
+	"fmt"
 	"flag"
 )
 
@@ -34,6 +35,7 @@ func main(){
 	baseDomains = config.Domains
 	searchTerms = config.SearchTerms
 	
+
 	for _, baseDomain = range(baseDomains) {
 		log.Println("\n\nSearching domain:", baseDomain, "for search terms", searchTerms)
 		fetchFiles(baseDomain, baseDomain, searchTerms)
@@ -68,7 +70,8 @@ func fetchFiles(domain string, baseDomain string, searchTerms []string) {
 	for _, searchTerm = range(searchTerms) {
 		search = searchBody(strings.ToLower(siteString), strings.ToLower(searchTerm))
 		if search == 0 {
-			log.Println("FOUND",searchTerm,"AT: ", URL)
+			//log.Println("FOUND",searchTerm,"AT: ", URL)
+			fmt.Fprintf(os.Stdout, "FOUND %s AT %s\n", searchTerm, URL)
 		} 
 	}
 
