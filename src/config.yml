@@ -1,6 +1,5 @@
 domains:
-  - https://Jsphbyd.github.io
-  - Wikipedia.com
+  - crawler-test.com
 search_terms:
   - John
   - Matthew
