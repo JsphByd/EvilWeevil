@@ -7,4 +7,5 @@ Run using ./src
 - Script only parses CSS, JS, and HTML files linked within the same domain
 - Script does not download any files locally
 - Script does not respect robots.txt
-- Script does not space out requests by default, define seconds to wait between requests using -w 
+- Script does not space out requests by default, define seconds to wait between requests using -w
+- Use output pipe to save output to file (example: ./src > output.txt)
