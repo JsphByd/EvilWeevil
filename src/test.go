@@ -1,15 +1,18 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"time"
 
 	//"bufio"
-	//"bytes"
+
+	"bytes"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -28,86 +31,117 @@ type Config struct {
 
 func main() {
 	var globalGraph Config
-	var path string
 	var yamlData yamlData
+	args := make([]string, 2)
 
-	flag.StringVar(&path, "p", "./config.yml", "path to domains file")
+	flag.StringVar(&args[0], "p", "./config.yml", "path to domains file")
+	flag.StringVar(&args[1], "w", "0", "wait a number of seconds between sending requests")
 	flag.Parse()
 
-	yamlData = readDomainsFile(path)
+	yamlData = readDomainsFile(args[0])
+	globalGraph.NetGraph = make(map[string][]string)
 
 	for _, baseDomain := range yamlData.Domains {
+
+		if string(baseDomain[len(baseDomain)-1]) == "/" { //remove trailing /
+			baseDomain = baseDomain[:len(baseDomain)-1]
+		}
+
 		globalGraph.Domain = baseDomain
 		log.Println("\n\nSearching Domain: ", baseDomain, "for search terms") //UU
-		globalGraph = parser(globalGraph, baseDomain)
+		globalGraph = parser(globalGraph, baseDomain, yamlData.SearchTerms, args)
 		fmt.Println(globalGraph.NetGraph)
 	}
 
 }
 
-func parser(graph Config, domain string) Config {
+func parser(graph Config, domain string, searchTerms []string, args []string) Config {
 	//var urlData io.ReadCloser
-	//var buf bytes.Buffer
 	var URL string
-	outgoingMap := make(map[string][]string)
+	var outgoingMap []string
+	var buf bytes.Buffer
+
+	if string(domain[len(domain)-1]) == "/" {
+		domain = domain[:len(domain)-1]
+	}
 
 	if !strings.Contains(domain, "http") {
 		URL = "https://" + domain
 	} else {
 		URL = domain
 	}
-	graph.Domain = URL
 
-	responseBody := getRespBody(URL)
-	defer responseBody.Close()
+	if _, ok := graph.NetGraph[URL]; !ok {
+		waitTime, _ := strconv.Atoi(args[1])
+		time.Sleep(time.Duration(waitTime) * time.Second)
 
-	// UU
-	//create a copy of resp body
-	//tee := io.TeeReader(responseBody, &buf)
-	//bytes, _ := io.ReadAll(tee)
-	//siteString := string(bytes)
+		response := getRespBody(URL)
 
-	//fmt.Println(siteString)
+		//check status code
+		if response.StatusCode == 404 {
+			log.Println("404 @", URL)
+		} else if response.StatusCode == 429 {
+			log.Println("429 @", URL)
+			time.Sleep(10 * time.Second)
+			response = getRespBody(URL)
+		}
+		responseBody := response.Body
+		defer responseBody.Close()
 
-	outgoingMap[URL] = getOutgoingLinks(responseBody, URL)
-	graph.NetGraph = outgoingMap
-	/*
-		1. Get outgoing links
-	*/
-	//for _, link := range graph.NetGraph[URL] {
-	//	parser(graph, link)
-	//}
+		tee := io.TeeReader(responseBody, &buf)
+		bytes, _ := io.ReadAll(tee)
+		siteString := string(bytes)
 
+		for _, searchTerm := range searchTerms {
+			if strings.Contains(siteString, searchTerm) {
+				fmt.Fprintf(os.Stdout, "FOUND %s AT %s\n", searchTerm, URL)
+			}
+		}
+
+		outgoingMap = getOutgoingLinks(&buf, URL, graph.Domain)
+		graph.NetGraph[URL] = append(graph.NetGraph[URL], outgoingMap...)
+		for _, link := range graph.NetGraph[URL] {
+			parser(graph, link, searchTerms, args)
+		}
+	}
 	return graph
 }
 
-func getOutgoingLinks(htmlBody io.Reader, URL string) []string {
+func getOutgoingLinks(htmlBody io.Reader, URL string, baseDomain string) []string {
 	var outGoingLinks []string
 	doc, err := html.Parse(htmlBody)
 	if err != nil {
 		log.Fatal("KILLED ON URL", URL, "FOR ERROR", err)
 	}
 
-	//var f func(*html.Node, []string) []string
 	var f func(*html.Node)
 	f = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			fmt.Println(n.Data)
-			if n.Data == "a" {
-				for _, attr := range n.Attr {
-					if len(attr.Val) != 0 {
-						if attr.Key == "href" && attr.Val != "#" && string(attr.Val[0]) != "?" {
-							aPath := attr.Val
-							fmt.Println(aPath)
-							if !strings.HasPrefix(aPath, "http") {
-								if string(aPath[0]) == "/" { //rel link
-									aPath = URL + attr.Val
-								} else if strings.HasPrefix(aPath, "//") {
-									aPath = "https:" + attr.Val
-								} else {
-									aPath = URL + "/" + aPath //UU
-								}
+
+		if n.Data == "a" {
+			for _, attr := range n.Attr {
+				if len(attr.Val) != 0 {
+					if attr.Key == "href" && string(attr.Val[0]) != "#" && string(attr.Val[0]) != "?" {
+						aPath := attr.Val
+
+						if string(URL[len(URL)-1]) == "/" {
+							URL = URL[:len(URL)-1]
+						}
+
+						if !strings.HasPrefix(aPath, "http") && aPath != "/" {
+							if string(aPath[0]) == "/" && string(aPath[1]) != "/" { //abs link
+								aPath = baseDomain + attr.Val
+							} else if strings.HasPrefix(aPath, "//") {
+								aPath = "https:" + attr.Val
+							} else { //rel link
+								aPath = URL + "/" + aPath //UU
 							}
+						} else if aPath == "/" { //root
+							aPath = baseDomain
+						}
+
+						domainSplit := strings.Split(baseDomain, ".")
+						aPathSplit := strings.Split(aPath, ".")
+						if strings.Contains(aPath, baseDomain) && aPathSplit[0] == domainSplit[0] {
 							outGoingLinks = append(outGoingLinks, aPath)
 						}
 					}
@@ -123,14 +157,14 @@ func getOutgoingLinks(htmlBody io.Reader, URL string) []string {
 	return outGoingLinks
 }
 
-func getRespBody(URL string) io.ReadCloser {
+func getRespBody(URL string) *http.Response {
 	resp, err := http.Get(URL)
 	errorOutput(err, false, "")
 	if err != nil {
 		log.Println("FAILED TO GET URL: ", URL)
 		return nil
 	}
-	return resp.Body
+	return resp
 }
 
 func readDomainsFile(path string) yamlData {
