@@ -69,6 +69,7 @@ func parser(graph Config, domain string, searchTerms []string, args []string) Co
 		URL = domain
 	}
 
+	log.Println(URL)
 
 	if _, ok := graph.NetGraph[URL]; !ok {
 		waitTime, _ := strconv.Atoi(args[1])
@@ -77,6 +78,8 @@ func parser(graph Config, domain string, searchTerms []string, args []string) Co
 		response := getRespBody(URL)
 
 		if response == nil {
+			return graph
+		} else if strings.Contains(URL, "/./.") {
 			return graph
 		}
 
@@ -119,11 +122,10 @@ func getOutgoingLinks(htmlBody io.Reader, URL string, baseDomain string) []strin
 
 	var f func(*html.Node)
 	f = func(n *html.Node) {
-
 		if n.Data == "a" {
 			for _, attr := range n.Attr {
 				if len(attr.Val) != 0 {
-					if attr.Key == "href" && string(attr.Val[0]) != "#" && string(attr.Val[0]) != "?" && !strings.Contains(attr.Val, ".."){
+					if attr.Key == "href" && string(attr.Val[0]) != "#" && !strings.Contains(attr.Val, "?") && !strings.Contains(attr.Val, "..") && !strings.HasPrefix(attr.Val, "mailto:") && !strings.HasPrefix(attr.Val, "tel:") && !strings.HasPrefix(attr.Val, "fax:") && !strings.HasPrefix(attr.Val, "skype:") && !strings.HasPrefix(attr.Val, "sms:") && !strings.HasPrefix(attr.Val, "geo:") && !strings.HasPrefix(attr.Val, "callto:") && !strings.HasPrefix(attr.Val, "/.") {
 						aPath := attr.Val
 
 						if string(URL[len(URL)-1]) == "/" {
@@ -136,7 +138,16 @@ func getOutgoingLinks(htmlBody io.Reader, URL string, baseDomain string) []strin
 							} else if strings.HasPrefix(aPath, "//") {
 								aPath = "https:" + attr.Val
 							} else { //rel link
-								aPath = URL + "/" + aPath //UU
+								if strings.Contains(aPath, ".") {
+									aPathSplit := strings.Split(aPath, ".")
+									if (strings.Contains(aPathSplit[len(aPathSplit)-1], "php") || strings.Contains(aPathSplit[len(aPathSplit)-1], "html") || strings.Contains(aPathSplit[len(aPathSplit)-1], "htm")) && (strings.Contains(URL, aPath)) {
+										aPath = URL
+									} else {
+										aPath = URL + "/" + aPath //UU
+									}
+								} else {
+									aPath = URL + "/" + aPath //UU
+								}
 							}
 						} else if aPath == "/" { //root
 							aPath = baseDomain
@@ -144,11 +155,11 @@ func getOutgoingLinks(htmlBody io.Reader, URL string, baseDomain string) []strin
 
 						domainSplit := strings.Split(baseDomain, ".")
 						aPathSplit := strings.Split(aPath, ".")
-						if strings.Contains(aPath, baseDomain) && aPathSplit[0] == domainSplit[0] {
+						if strings.Contains(aPath, baseDomain) && aPathSplit[0] == domainSplit[0] && aPath != URL {
 							outGoingLinks = append(outGoingLinks, aPath)
 						}
 					}
-				} 
+				}
 			}
 		}
 
