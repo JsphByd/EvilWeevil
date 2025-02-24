@@ -5,8 +5,7 @@ import (
 	"log"
 	"time"
 
-	//"bufio"
-
+	"regexp"
 	"bytes"
 	"flag"
 	"io"
@@ -22,6 +21,7 @@ import (
 type yamlData struct {
 	Domains     []string `yaml:"domains"`
 	SearchTerms []string `yaml:"search_terms"`
+	RegexTerms  []string `yaml: "regex_terms"`
 }
 
 type Config struct {
@@ -32,10 +32,11 @@ type Config struct {
 func main() {
 	var globalGraph Config
 	var yamlData yamlData
-	args := make([]string, 2)
+	args := make([]string, 3)
 
 	flag.StringVar(&args[0], "p", "./config.yml", "path to domains file")
 	flag.StringVar(&args[1], "w", "0", "wait a number of seconds between sending requests")
+	flag.StringVar(&args[2], "rP", " ", "Preset regex string (email, phone numbers, code comments)")
 	flag.Parse()
 
 	yamlData = readDomainsFile(args[0])
@@ -49,15 +50,17 @@ func main() {
 
 		globalGraph.Domain = baseDomain
 		log.Println("\n\nSearching Domain: ", baseDomain, "for search terms") //UU
-		globalGraph = parser(globalGraph, baseDomain, yamlData.SearchTerms, args)
+		globalGraph = parser(globalGraph, baseDomain, yamlData, args)
 	}
 }
 
-func parser(graph Config, domain string, searchTerms []string, args []string) Config {
+func parser(graph Config, domain string, yamlData yamlData, args []string) Config {
 	//var urlData io.ReadCloser
 	var URL string
 	var outgoingMap []string
 	var buf bytes.Buffer
+	searchTerms := yamlData.SearchTerms
+	regexTerms := yamlData.RegexTerms
 
 	if string(domain[len(domain)-1]) == "/" {
 		domain = domain[:len(domain)-1]
@@ -69,7 +72,7 @@ func parser(graph Config, domain string, searchTerms []string, args []string) Co
 		URL = domain
 	}
 
-	log.Println(URL)
+	//log.Println(URL)
 
 	if _, ok := graph.NetGraph[URL]; !ok {
 		waitTime, _ := strconv.Atoi(args[1])
@@ -94,20 +97,34 @@ func parser(graph Config, domain string, searchTerms []string, args []string) Co
 		responseBody := response.Body
 		defer responseBody.Close()
 
+		//need two copies of buffer, one for the search function and another for the link parser 
 		tee := io.TeeReader(responseBody, &buf)
 		bytes, _ := io.ReadAll(tee)
 		siteString := string(bytes)
 
+		//searching for stuff!
+		// 1. Search plaintext strings in search_terms
 		for _, searchTerm := range searchTerms {
 			if strings.Contains(siteString, searchTerm) {
 				fmt.Fprintf(os.Stdout, "FOUND %s AT %s\n", searchTerm, URL)
+			}
+		}
+		// 2. Search regex strings in regex_terms
+		for _, regexTerm := range regexTerms {
+			pattern := regexTerm
+			match, err := regexp.MatchString(pattern, siteString)
+			fmt.Println(regexTerm)
+			if err != nil {
+				errorOutput(err, false, string("Invalid regular expression: " + regexTerm))
+			} else {
+				fmt.Println("MATCH FOUND! ----------------------------------------", match)
 			}
 		}
 
 		outgoingMap = getOutgoingLinks(&buf, URL, graph.Domain)
 		graph.NetGraph[URL] = append(graph.NetGraph[URL], outgoingMap...)
 		for _, link := range graph.NetGraph[URL] {
-			parser(graph, link, searchTerms, args)
+			parser(graph, link, yamlData, args)
 		}
 	}
 	return graph

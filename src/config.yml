@@ -1,4 +1,6 @@
 domains:
-  - DOMAINS_TO_SEARCH
+  - crawler-test.com
 search_terms:
-  - TERMS_TO_SEARCH
+  - redirect
+regex_terms:
+  - .*
