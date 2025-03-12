@@ -1,5 +1,6 @@
 
-![nut-weevil-closeup-photography-brown-washington-dc-wallpaper](https://github.com/user-attachments/assets/d98afca8-6ed3-4dd5-b8ef-c041f36ef43e)
+![image](https://github.com/user-attachments/assets/40b7bc7e-872c-4ce9-b13e-d6cd5829f87d)
+
 
 This script crawls through a domain to find search terms.
 
