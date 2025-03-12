@@ -1,6 +1,7 @@
 domains:
-  - crawler-test.com
 search_terms:
-  - redirect
 regex_terms:
-  - .*
+find_emails: true
+find_HTML_comments: true
+find_JS_comments: true
+find_CSS_comments: true
