@@ -1,223 +1,528 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"image"
+	"image/png"
 	"log"
-	"time"
-
-	"regexp"
-	"bytes"
-	"flag"
-	"io"
-	"net/http"
 	"os"
 	"strconv"
-	"strings"
+	"sync"
 
-	"golang.org/x/net/html"
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 	"gopkg.in/yaml.v2"
 )
 
-type yamlData struct {
-	Domains     []string `yaml:"domains"`
-	SearchTerms []string `yaml:"search_terms"`
-	RegexTerms  []string `yaml: "regex_terms"`
+type GUIInteratables struct {
+	App          *tview.Application
+	ScanInfo     *tview.TextView
+	Results      *tview.TextView
+	ImagePane    *tview.Image
+	SuccessCount *int
+	FailCount    *int
+	Image        *image.Image
+	RedImage     *image.Image
+	Findings     *map[string]map[string][]string
 }
 
-type Config struct {
-	Domain   string
-	NetGraph map[string][]string
+type yamlData struct {
+	Domains            []string `yaml:"domains"`
+	SearchTerms        []string `yaml:"search_terms"`
+	RegexTerms         []string `yaml:"regex_terms"`
+	Find_emails        bool     `yaml:"find_emails"`
+	Find_HTML_comments bool     `yaml:"find_HTML_comments"`
+	Find_JS_comments   bool     `yaml:"find_JS_comments"`
+	Find_CSS_comments  bool     `yaml:"find_CSS_comments"`
 }
 
 func main() {
-	var globalGraph Config
-	var yamlData yamlData
-	args := make([]string, 3)
+	var yamlData = readDomainsFile("./config.yml")
+	scannerRunning := false
+	ctx, cancel := context.WithCancel(context.Background())
+	findings := make(map[string]map[string][]string)
+	var GUIInteratables GUIInteratables
+	var wg sync.WaitGroup
+	var failCount int
+	var successCount int
+	presetRegexStatus := make([]bool, 4)
+	presetRegexStatus[0] = yamlData.Find_emails
+	presetRegexStatus[1] = yamlData.Find_HTML_comments
+	presetRegexStatus[2] = yamlData.Find_JS_comments
+	presetRegexStatus[3] = yamlData.Find_CSS_comments
 
-	flag.StringVar(&args[0], "p", "./config.yml", "path to domains file")
-	flag.StringVar(&args[1], "w", "0", "wait a number of seconds between sending requests")
-	flag.StringVar(&args[2], "rP", " ", "Preset regex string (email, phone numbers, code comments)")
-	flag.Parse()
-
-	yamlData = readDomainsFile(args[0])
-	globalGraph.NetGraph = make(map[string][]string)
-
-	for _, baseDomain := range yamlData.Domains {
-
-		if string(baseDomain[len(baseDomain)-1]) == "/" { //remove trailing /
-			baseDomain = baseDomain[:len(baseDomain)-1]
-		}
-
-		globalGraph.Domain = baseDomain
-		log.Println("\n\nSearching Domain: ", baseDomain, "for search terms") //UU
-		globalGraph = parser(globalGraph, baseDomain, yamlData, args)
-	}
-}
-
-func parser(graph Config, domain string, yamlData yamlData, args []string) Config {
-	//var urlData io.ReadCloser
-	var URL string
-	var outgoingMap []string
-	var buf bytes.Buffer
-	searchTerms := yamlData.SearchTerms
-	regexTerms := yamlData.RegexTerms
-
-	if string(domain[len(domain)-1]) == "/" {
-		domain = domain[:len(domain)-1]
+	newPrimitive := func(text string) tview.Primitive {
+		return tview.NewTextView().
+			SetTextAlign(tview.AlignCenter).
+			SetText(text)
 	}
 
-	if !strings.Contains(domain, "http") {
-		URL = "https://" + domain
-	} else {
-		URL = domain
-	}
+	app := tview.NewApplication()
 
-	//log.Println(URL)
+	scanInfo := tview.NewTextView().
+		SetDynamicColors(false).
+		SetRegions(true).
+		SetChangedFunc(func() {
+			app.Draw()
+		})
 
-	if _, ok := graph.NetGraph[URL]; !ok {
-		waitTime, _ := strconv.Atoi(args[1])
-		time.Sleep(time.Duration(waitTime) * time.Second)
+	editorMenu := tview.NewList()
 
-		response := getRespBody(URL)
+	domainEditor := tview.NewForm()
+	domainTable := tview.NewTable()
+	domainEditorInfo := tview.NewTextView().
+		SetDynamicColors(false).
+		SetRegions(true).
+		SetChangedFunc(func() {
+			app.Draw()
+		})
+	searchEditor := tview.NewForm()
+	searchTable := tview.NewTable()
+	searchEditorInfo := tview.NewTextView().
+		SetDynamicColors(false).
+		SetRegions(true).
+		SetChangedFunc(func() {
+			app.Draw()
+		})
 
-		if response == nil {
-			return graph
-		} else if strings.Contains(URL, "/./.") {
-			return graph
-		}
+	regexEditor := tview.NewForm()
+	regexTable := tview.NewTable()
+	regexEditorInfo := tview.NewTextView().
+		SetDynamicColors(false).
+		SetRegions(true).
+		SetChangedFunc(func() {
+			app.Draw()
+		})
 
-		//check status code
-		if response.StatusCode == 404 {
-			log.Println("404 @", URL)
-		} else if response.StatusCode == 429 {
-			log.Println("429 @", URL)
-			time.Sleep(10 * time.Second)
-			response = getRespBody(URL)
-		}
-		responseBody := response.Body
-		defer responseBody.Close()
+	domainFlexBox := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(domainEditor, 5, 1, false).
+		AddItem(domainEditorInfo, 2, 1, false).
+		AddItem(domainTable, 0, 1, false)
 
-		//need two copies of buffer, one for the search function and another for the link parser 
-		tee := io.TeeReader(responseBody, &buf)
-		bytes, _ := io.ReadAll(tee)
-		siteString := string(bytes)
+	searchFlexBox := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(searchEditor, 5, 1, false).
+		AddItem(searchEditorInfo, 2, 1, false).
+		AddItem(searchTable, 0, 1, false)
 
-		//searching for stuff!
-		// 1. Search plaintext strings in search_terms
-		for _, searchTerm := range searchTerms {
-			if strings.Contains(siteString, searchTerm) {
-				fmt.Fprintf(os.Stdout, "FOUND %s AT %s\n", searchTerm, URL)
+	regexFlexBox := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(regexEditor, 15, 1, false).
+		AddItem(regexEditorInfo, 2, 1, false).
+		AddItem(regexTable, 0, 1, false)
+
+	resultsPage := tview.NewTextView().SetText("HELLO")
+
+	helpString := `HELP/INFO
+	PRESS TAB TO SELECT NEXT OPTION
+	SHIFT+TAB TO SELECT PREV OPTION
+	PRESS ENTER TO SELECT
+	PRESS ESC TO RETURN TO PREVIOUS MENU
+	`
+	helpText := tview.NewTextView().SetText(helpString)
+
+	pages := tview.NewPages().
+		AddPage("help", helpText, true, true).
+		AddPage("editorMenu", editorMenu, true, false).
+		AddPage("domainEditor", domainFlexBox, true, false).
+		AddPage("searchEditor", searchFlexBox, true, false).
+		AddPage("regexEditor", regexFlexBox, true, false).
+		AddPage("results", resultsPage, true, false)
+
+	scanInfo.SetTextAlign(tview.AlignCenter).SetText("\nScanned: [red]0[white]\nFailed: [red]0[white]")
+
+	//list menu options
+	list := tview.NewList().SetSelectedBackgroundColor(tcell.ColorRed)
+	editorMenu.SetSelectedBackgroundColor(tcell.ColorGray)
+	list.AddItem("Help", "", 'a', func() {
+		pages.SwitchToPage("help")
+	}).
+		AddItem("Edit Configuration", "", 'b', func() {
+			pages.SwitchToPage("editorMenu")
+			app.SetFocus(editorMenu)
+			editorMenu.SetSelectedBackgroundColor(tcell.ColorRed)
+			list.SetSelectedBackgroundColor(tcell.ColorGray)
+		}).
+		AddItem("View Findings", "", 'c', func() {
+			pages.SwitchToPage("results")
+		}).
+		AddItem("Start/Stop Scanner", "", 'd', func() {
+			if !scannerRunning {
+				scannerRunning = true
+				GUIInteratables.ImagePane.SetImage(*GUIInteratables.RedImage)
+				scanInfo.SetText("RUNNING")
+				wg.Add(1)
+				yamlData = readDomainsFile("./config.yml")
+				go initScan(ctx, GUIInteratables, yamlData)
+			} else if scannerRunning {
+				cancel()
+				scanInfo.SetText("NOT RUNNING")
+				scannerRunning = false
+				GUIInteratables.ImagePane.SetImage(*GUIInteratables.Image)
+				ctx, cancel = context.WithCancel(context.Background())
+				*GUIInteratables.SuccessCount = 0
+				*GUIInteratables.FailCount = 0
 			}
-		}
-		// 2. Search regex strings in regex_terms
-		for _, regexTerm := range regexTerms {
-			pattern := regexTerm
-			match, err := regexp.MatchString(pattern, siteString)
-			fmt.Println(regexTerm)
-			if err != nil {
-				errorOutput(err, false, string("Invalid regular expression: " + regexTerm))
-			} else {
-				fmt.Println("MATCH FOUND! ----------------------------------------", match)
-			}
-		}
+		}).
+		AddItem("Quit", "Press q to exit", 'q', func() {
+			app.Stop()
+		})
 
-		outgoingMap = getOutgoingLinks(&buf, URL, graph.Domain)
-		graph.NetGraph[URL] = append(graph.NetGraph[URL], outgoingMap...)
-		for _, link := range graph.NetGraph[URL] {
-			parser(graph, link, yamlData, args)
-		}
-	}
-	return graph
-}
+	editorMenu.AddItem("Edit Domain List", "", '1', func() {
+		updateTable(domainTable, "d")
+		pages.SwitchToPage("domainEditor")
+		domainEditorInfo.SetText("")
+		app.SetFocus(domainEditor)
+	}).AddItem("Edit Search Terms", "", '2', func() {
+		updateTable(searchTable, "s")
+		pages.SwitchToPage("searchEditor")
+		searchEditorInfo.SetText("")
+		app.SetFocus(searchEditor)
+	}).AddItem("Add Custom Regex", "", '3', func() {
+		updateTable(regexTable, "r")
+		pages.SwitchToPage("regexEditor")
+		regexEditorInfo.SetText("")
+		app.SetFocus(regexEditor)
+	})
 
-func getOutgoingLinks(htmlBody io.Reader, URL string, baseDomain string) []string {
-	var outGoingLinks []string
-	doc, err := html.Parse(htmlBody)
-	if err != nil {
-		log.Fatal("KILLED ON URL", URL, "FOR ERROR", err)
-	}
-
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Data == "a" {
-			for _, attr := range n.Attr {
-				if len(attr.Val) != 0 {
-					if attr.Key == "href" && string(attr.Val[0]) != "#" && !strings.Contains(attr.Val, "?") && !strings.Contains(attr.Val, "..") && !strings.HasPrefix(attr.Val, "mailto:") && !strings.HasPrefix(attr.Val, "tel:") && !strings.HasPrefix(attr.Val, "fax:") && !strings.HasPrefix(attr.Val, "skype:") && !strings.HasPrefix(attr.Val, "sms:") && !strings.HasPrefix(attr.Val, "geo:") && !strings.HasPrefix(attr.Val, "callto:") && !strings.HasPrefix(attr.Val, "/.") {
-						aPath := attr.Val
-
-						if string(URL[len(URL)-1]) == "/" {
-							URL = URL[:len(URL)-1]
-						}
-
-						if !strings.HasPrefix(aPath, "http") && aPath != "/" {
-							if string(aPath[0]) == "/" && string(aPath[1]) != "/" { //abs link
-								aPath = baseDomain + attr.Val
-							} else if strings.HasPrefix(aPath, "//") {
-								aPath = "https:" + attr.Val
-							} else { //rel link
-								if strings.Contains(aPath, ".") {
-									aPathSplit := strings.Split(aPath, ".")
-									if (strings.Contains(aPathSplit[len(aPathSplit)-1], "php") || strings.Contains(aPathSplit[len(aPathSplit)-1], "html") || strings.Contains(aPathSplit[len(aPathSplit)-1], "htm")) && (strings.Contains(URL, aPath)) {
-										aPath = URL
-									} else {
-										aPath = URL + "/" + aPath //UU
-									}
-								} else {
-									aPath = URL + "/" + aPath //UU
-								}
-							}
-						} else if aPath == "/" { //root
-							aPath = baseDomain
-						}
-
-						domainSplit := strings.Split(baseDomain, ".")
-						aPathSplit := strings.Split(aPath, ".")
-						if strings.Contains(aPath, baseDomain) && aPathSplit[0] == domainSplit[0] && aPath != URL {
-							outGoingLinks = append(outGoingLinks, aPath)
-						}
-					}
+	//FORMS
+	domainEditor.AddInputField("DOMAIN", "", 20, nil, nil).
+		AddButton("ADD", func() {
+			domainItem := domainEditor.GetFormItemByLabel("DOMAIN").(*tview.InputField).GetText()
+			errMsg := false
+			for _, domain := range yamlData.Domains {
+				if domainItem == domain {
+					domainEditorInfo.SetText("[red]DOMAIN ALREADY ADDED[white]")
+					errMsg = true
+					break
 				}
 			}
-		}
+			if !errMsg {
+				yamlData.Domains = append(yamlData.Domains, domainItem)
 
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
+				updateYAMLFile(yamlData)
+				updateTable(domainTable, "d")
+				domainEditorInfo.SetText("[green]DOMAIN ADDED[white]")
+			}
+		}).
+		AddButton("REMOVE", func() {
+			domainItem := domainEditor.GetFormItemByLabel("DOMAIN").(*tview.InputField).GetText()
+			found := false
+
+			num, err := strconv.Atoi(domainItem)
+			if err != nil {
+				for i, domain := range yamlData.Domains {
+					if domainItem == domain {
+						yamlData.Domains[i] = yamlData.Domains[len(yamlData.Domains)-1]
+						yamlData.Domains = yamlData.Domains[:len(yamlData.Domains)-1]
+						updateYAMLFile(yamlData)
+						updateTable(domainTable, "d")
+						domainEditorInfo.SetText("[green]DOMAIN REMOVED[white]")
+						found = true
+						break
+					}
+				}
+				if !found {
+					domainEditorInfo.SetText("[red]DOMAIN NOT FOUND[white]")
+				}
+			} else {
+				if num < len(yamlData.Domains) && num >= 0 {
+					yamlData.Domains[num] = yamlData.Domains[len(yamlData.Domains)-1]
+					yamlData.Domains = yamlData.Domains[:len(yamlData.Domains)-1]
+					updateYAMLFile(yamlData)
+					updateTable(domainTable, "d")
+					domainEditorInfo.SetText("[green]DOMAIN REMOVED[white]")
+				} else {
+					domainEditorInfo.SetText("[red]INDEX OUT OF BOUNDS[white]")
+				}
+			}
+		})
+
+	searchEditor.AddInputField("SEARCH TERM", "", 20, nil, nil).
+		AddButton("ADD", func() {
+			searchTerm := searchEditor.GetFormItemByLabel("SEARCH TERM").(*tview.InputField).GetText()
+			errMsg := false
+			for _, searchT := range yamlData.SearchTerms {
+				if searchTerm == searchT {
+					searchEditorInfo.SetText("[red]SEARCH TERM ALREADY ADDED[white]")
+					errMsg = true
+					break
+				}
+			}
+			if !errMsg {
+				yamlData.SearchTerms = append(yamlData.SearchTerms, searchTerm)
+				updateYAMLFile(yamlData)
+				updateTable(searchTable, "s")
+				searchEditorInfo.SetText("[green]SEARCH TERM ADDED[white]")
+			}
+		}).
+		AddButton("REMOVE", func() {
+			searchTerm := searchEditor.GetFormItemByLabel("SEARCH TERM").(*tview.InputField).GetText()
+			found := false
+
+			num, err := strconv.Atoi(searchTerm)
+			if err != nil {
+				for i, searchT := range yamlData.SearchTerms {
+					if searchT == searchTerm {
+						yamlData.SearchTerms[i] = yamlData.SearchTerms[len(yamlData.SearchTerms)-1]
+						yamlData.SearchTerms = yamlData.SearchTerms[:len(yamlData.SearchTerms)-1]
+						updateYAMLFile(yamlData)
+						updateTable(searchTable, "s")
+						searchEditorInfo.SetText("[green]SEARCH TERM REMOVED[white]")
+						found = true
+						break
+					}
+				}
+				if !found {
+					searchEditorInfo.SetText("[red]TERM NOT FOUND[white]")
+				}
+			} else {
+				if num < len(yamlData.SearchTerms) && num >= 0 {
+					yamlData.SearchTerms[num] = yamlData.SearchTerms[len(yamlData.SearchTerms)-1]
+					yamlData.SearchTerms = yamlData.SearchTerms[:len(yamlData.SearchTerms)-1]
+					updateYAMLFile(yamlData)
+					updateTable(searchTable, "s")
+					searchEditorInfo.SetText("[green]SEARCH TERM REMOVED[white]")
+				} else {
+					searchEditorInfo.SetText("[red]INDEX OUT OF BOUNDS[white]")
+				}
+			}
+		})
+
+	regexEditor.AddCheckbox("Emails", presetRegexStatus[0], func(checked bool) {
+		yamlData.Find_emails = checked
+		updateYAMLFile(yamlData)
+	}).
+		AddCheckbox("HTML Comments", presetRegexStatus[1], func(checked bool) {
+			yamlData.Find_HTML_comments = checked
+			updateYAMLFile(yamlData)
+		}).
+		AddCheckbox("JS Comments", presetRegexStatus[2], func(checked bool) {
+			yamlData.Find_JS_comments = checked
+			updateYAMLFile(yamlData)
+		}).
+		AddCheckbox("CSS Comments", presetRegexStatus[3], func(checked bool) {
+			yamlData.Find_CSS_comments = checked
+			updateYAMLFile(yamlData)
+		}).
+		AddInputField("CUST. REGEX", "", 20, nil, nil).
+		AddButton("ADD", func() {
+			regexTerm := regexEditor.GetFormItemByLabel("CUST. REGEX").(*tview.InputField).GetText()
+			errMsg := false
+			for _, regex := range yamlData.RegexTerms {
+				if regex == regexTerm {
+					regexEditorInfo.SetText("[red]REGEX ALREADY ADDED[white]")
+					errMsg = true
+					break
+				}
+			}
+			if !errMsg {
+				yamlData.RegexTerms = append(yamlData.RegexTerms, regexTerm)
+				updateYAMLFile(yamlData)
+				updateTable(regexTable, "r")
+				regexEditorInfo.SetText("[green]REGEX ADDED[white]")
+			}
+		}).
+		AddButton("REMOVE", func() {
+			regexTerm := regexEditor.GetFormItemByLabel("CUST. REGEX").(*tview.InputField).GetText()
+			found := false
+			num, err := strconv.Atoi(regexTerm)
+			if err != nil {
+				for i, regex := range yamlData.RegexTerms {
+					if regex == regexTerm {
+						yamlData.RegexTerms[i] = yamlData.RegexTerms[len(yamlData.RegexTerms)-1]
+						yamlData.RegexTerms = yamlData.RegexTerms[:len(yamlData.RegexTerms)-1]
+						updateYAMLFile(yamlData)
+						updateTable(regexTable, "r")
+						regexEditorInfo.SetText("[green]REGEX REMOVED[white]")
+						found = true
+						break
+					}
+				}
+				if !found {
+					regexEditorInfo.SetText("[red]REGEX NOT FOUND[white]")
+				}
+			} else {
+				if num < len(yamlData.RegexTerms) && num >= 0 {
+					yamlData.RegexTerms[num] = yamlData.RegexTerms[len(yamlData.RegexTerms)-1]
+					yamlData.RegexTerms = yamlData.RegexTerms[:len(yamlData.RegexTerms)-1]
+					updateYAMLFile(yamlData)
+					updateTable(regexTable, "r")
+					regexEditorInfo.SetText("[green]REGEX REMOVED[white]")
+				} else {
+					regexEditorInfo.SetText("[red]INDEX OUT OF BOUNDS[white]")
+				}
+			}
+		})
+
+	centeredList := tview.NewFlex().
+		SetDirection(tview.FlexColumn).
+		AddItem(nil, 0, 1, false).
+		AddItem(list, 0, 1, true).
+		AddItem(nil, 0, 1, false)
+
+	//get image
+	imageFile0, err := os.Open("./image.png")
+	if err != nil {
+		log.Println(err)
+		os.Exit(1)
 	}
-	f(doc)
-	return outGoingLinks
+
+	imageFile1, err := os.Open("redImage.png")
+	if err != nil {
+		log.Println(err)
+		os.Exit(1)
+	}
+
+	imageData0, err := png.Decode(imageFile0)
+	if err != nil {
+		log.Println(err)
+		os.Exit(1)
+	}
+
+	imageData1, err := png.Decode(imageFile1)
+	if err != nil {
+		log.Println(err)
+		os.Exit(1)
+	}
+
+	imagePane := tview.NewImage().SetImage(imageData0)
+
+	info := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(newPrimitive("PAGE STATS"), 1, 1, false).
+		AddItem(scanInfo, 0, 1, false)
+	main := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(newPrimitive("MENU"), 0, 1, false).
+		AddItem(centeredList, 0, 5, true).
+		AddItem(imagePane, 0, 8, false)
+	sideBar := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(pages, 0, 1, false)
+
+	//main.AddItem(buttonFlexBox)
+
+	grid := tview.NewGrid().
+		SetRows(5, 0).
+		SetColumns(30, 0).
+		SetBorders(true)
+
+	// Layout for screens narrower than 100 cells (menu and side bar are hidden).
+	grid.AddItem(info, 0, 0, 1, 2, 0, 0, false).
+		AddItem(main, 1, 0, 1, 2, 0, 0, false).
+		AddItem(sideBar, 0, 2, 2, 0, 0, 0, false)
+
+	// Layout for screens wider than 100 cells.
+	grid.AddItem(info, 0, 0, 1, 2, 0, 0, false).
+		AddItem(main, 1, 0, 1, 2, 0, 100, false).
+		AddItem(sideBar, 0, 2, 2, 1, 0, 100, false)
+
+	//keyboard stuff
+	editorMenu.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyESC:
+			currentPage, _ := pages.GetFrontPage()
+			if currentPage == "editorMenu" {
+				app.SetFocus(list)
+				editorMenu.SetSelectedBackgroundColor(tcell.ColorGray)
+				list.SetSelectedBackgroundColor(tcell.ColorRed)
+			}
+		}
+		return event
+	})
+	domainEditor.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyESC:
+			currentPage, _ := pages.GetFrontPage()
+			if currentPage == "domainEditor" {
+				pages.SwitchToPage("editorMenu")
+				app.SetFocus(editorMenu)
+			}
+		}
+		return event
+	})
+	searchEditor.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyESC:
+			currentPage, _ := pages.GetFrontPage()
+			if currentPage == "searchEditor" {
+				pages.SwitchToPage("editorMenu")
+				app.SetFocus(editorMenu)
+			}
+		}
+		return event
+	})
+	regexEditor.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyESC:
+			currentPage, _ := pages.GetFrontPage()
+			if currentPage == "regexEditor" {
+				pages.SwitchToPage("editorMenu")
+				app.SetFocus(editorMenu)
+			}
+		}
+		return event
+	})
+
+	//store elements in GUIInteractables
+
+	GUIInteratables.App = app
+	GUIInteratables.ScanInfo = scanInfo
+	GUIInteratables.SuccessCount = &successCount
+	GUIInteratables.FailCount = &failCount
+	GUIInteratables.ImagePane = imagePane
+	GUIInteratables.Image = &imageData0
+	GUIInteratables.RedImage = &imageData1
+	GUIInteratables.Findings = &findings
+	GUIInteratables.Results = resultsPage
+
+	if err := app.SetRoot(grid, true).SetFocus(list).Run(); err != nil {
+		panic(err)
+	}
+
 }
 
-func getRespBody(URL string) *http.Response {
-	resp, err := http.Get(URL)
-	errorOutput(err, false, "")
-	if err != nil {
-		log.Println("FAILED TO GET URL: ", URL)
-		return nil
+func updateTable(table *tview.Table, dataType string) {
+	var dataArray []string
+	if dataType == "d" {
+		dataArray = readDomainsFile("./config.yml").Domains
+	} else if dataType == "s" {
+		dataArray = readDomainsFile("./config.yml").SearchTerms
+	} else if dataType == "r" {
+		dataArray = readDomainsFile("./config.yml").RegexTerms
 	}
-	return resp
+
+	table.Clear()
+	for i, item := range dataArray {
+		table.InsertRow(i).SetCellSimple(i, 0, strconv.Itoa(i)+" - "+item)
+	}
+
+}
+
+func updateYAMLFile(yamlData yamlData) {
+	data, err := yaml.Marshal(&yamlData)
+	if err != nil {
+		log.Fatal("Critical Error")
+	}
+
+	err = os.WriteFile("./config.yml", data, 0644)
+	if err != nil {
+		log.Fatal("Cannot write to file")
+	}
 }
 
 func readDomainsFile(path string) yamlData {
 	var config yamlData
-	yamlData, err := os.ReadFile("config.yml")
-	message := "INVALID FILE PATH " + path
-	errorOutput(err, true, message)
+	yamlData, err := os.ReadFile(path)
+	errorOutput(err, true)
 
 	err = yaml.Unmarshal(yamlData, &config)
 	if err != nil {
-		log.Fatal(err)
+		os.Exit(0)
 	}
-	errorOutput(err, true, "Invalid Yaml")
+	errorOutput(err, true)
 
 	return config
-}
-
-func errorOutput(err error, kill bool, message string) {
-	if err != nil {
-		log.Println(err)
-		if kill {
-			log.Fatal(message)
-		}
-	}
 }
