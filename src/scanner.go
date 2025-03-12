@@ -66,6 +66,7 @@ func initScan(ctx context.Context, GUIInteratables GUIInteratables, yamlData yam
 	}
 
 	GUIInteratables.Results.SetText(resultsString)
+	updateGUI(GUIInteratables, "SCAN FINISHED")
 
 }
 

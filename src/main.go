@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"image"
 	"image/png"
 	"log"
@@ -112,7 +113,7 @@ func main() {
 		AddItem(regexEditorInfo, 2, 1, false).
 		AddItem(regexTable, 0, 1, false)
 
-	resultsPage := tview.NewTextView().SetText("HELLO")
+	resultsPage := tview.NewTextView().SetText("No Scan Started! Start Scan to Collect Data!")
 
 	helpString := `HELP/INFO
 	PRESS TAB TO SELECT NEXT OPTION
@@ -144,10 +145,27 @@ func main() {
 			editorMenu.SetSelectedBackgroundColor(tcell.ColorRed)
 			list.SetSelectedBackgroundColor(tcell.ColorGray)
 		}).
-		AddItem("View Findings", "", 'c', func() {
+		AddItem("Preview Findings", "", 'c', func() {
 			pages.SwitchToPage("results")
 		}).
-		AddItem("Start/Stop Scanner", "", 'd', func() {
+		AddItem("Save Findings", "", 'd', func() {
+			jsonData, err := json.MarshalIndent(findings, "", "  ")
+			if err != nil {
+				return
+			}
+
+			file, err := os.Create("latestScan.json")
+			if err != nil {
+				return
+			}
+			defer file.Close()
+
+			_, err = file.Write(jsonData)
+			if err != nil {
+				return
+			}
+		}).
+		AddItem("Start/Stop Scanner", "", 'e', func() {
 			if !scannerRunning {
 				scannerRunning = true
 				GUIInteratables.ImagePane.SetImage(*GUIInteratables.RedImage)
@@ -157,7 +175,7 @@ func main() {
 				go initScan(ctx, GUIInteratables, yamlData)
 			} else if scannerRunning {
 				cancel()
-				scanInfo.SetText("NOT RUNNING")
+				scanInfo.SetText("Killing Scan")
 				scannerRunning = false
 				GUIInteratables.ImagePane.SetImage(*GUIInteratables.Image)
 				ctx, cancel = context.WithCancel(context.Background())
